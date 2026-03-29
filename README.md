@@ -114,8 +114,8 @@ async def _examples():
     # Or start in a specific state
     state_machine = ProcessLifecycle(state=ProcessLifecycle.States.running)
 
-    # Transition to a specific state
-    await state_machine.enter_state(ProcessLifecycle.States.stopping)
+    # Force a specific state directly
+    await state_machine.force_enter_state(ProcessLifecycle.States.stopping)
 
     # Trigger an event
     await state_machine.trigger_event("stop", key="value")
@@ -224,7 +224,7 @@ async def _example() -> None:
     # Set at initialization time
     state_machine = StateMachine(state=StateMachine.States.stopping)
 
-    # Enter a state directly
+    # Enter an initial state directly
     state_machine = StateMachine()
     await state_machine.enter_state(StateMachine.States.running)
 
@@ -280,8 +280,8 @@ class StateMachine(statesman.HistoryMixin, statesman.StateMachine):
 async def _example() -> None:
     state_machine = StateMachine()
     await state_machine.enter_state(StateMachine.States.first)
-    await state_machine.enter_state(StateMachine.States.second)
-    await state_machine.enter_state(StateMachine.States.third)
+    await state_machine.force_enter_state(StateMachine.States.second)
+    await state_machine.force_enter_state(StateMachine.States.third)
 ```
 
 The type of transition performed is configurable (see below).
@@ -352,7 +352,7 @@ async def _example() -> None:
     state_machine = await StateMachine.create()
     bool_result = await state_machine.trigger_event("start")
     int_result = await state_machine.start(return_type=object)
-    transition = await state_machine.enter_state(
+    transition = await state_machine.force_enter_state(
         StateMachine.States.stopped,
         return_type=statesman.Transition
     )
@@ -648,10 +648,9 @@ the `Config` class nested within the state machine class.
 
 There are four behaviors available for configuration via `state_entry`:
 
-* `statesman.Entry.allow` (Default): The `enter_state` method can be called at
-    any time.
-* `statesman.Entry.initial`: The `enter_state` method can be called to
-    establish an initial state and thereafter is forbidden.
+* `statesman.Entry.allow`: The `enter_state` method can be called at any time.
+* `statesman.Entry.initial` (Default): The `enter_state` method can be called
+    to establish an initial state and thereafter is forbidden.
 * `statesman.Entry.ignore`: The `enter_state` method can never succeed and
     will fail and return silently when called.
 * `statesman.Entry.forbid`: The `enter_state` method can never succeed and will
@@ -698,9 +697,9 @@ class StateMachine(statesman.HistoryMixin, statesman.StateMachine):
 async def _example() -> None:
     state_machine = StateMachine()
     await state_machine.enter_state(StateMachine.States.analyzing)
-    await state_machine.enter_state(StateMachine.States.awaiting_measurement)
-    await state_machine.enter_state(StateMachine.States.done)
-    await state_machine.enter_state(StateMachine.States.failed)
+    await state_machine.force_enter_state(StateMachine.States.awaiting_measurement)
+    await state_machine.force_enter_state(StateMachine.States.done)
+    await state_machine.force_enter_state(StateMachine.States.failed)
 
     print(f"The history is: {state_machine.history}")
 ```
@@ -712,11 +711,9 @@ become desirable for the state machine to follow a defined linear sequence of
 transitions.
 
 Statesman supports such use cases via the `statesman.SequencingMixin` class.
-Transitions can be sequenced by passing **coroutine** objects into the
-`sequence` method. Coroutine objects are returned when you call an async
-function but do not await its execution. The coroutine objects freeze your
-desired state transition, which are queued for iterative execution by invoking
-the `next_transition` method.
+Transitions can be sequenced by passing explicit `statesman.transition_call(...)`
+requests into the `sequence` method. This keeps the queued transition data
+explicit and avoids relying on coroutine introspection.
 
 ```python
 from typing import List
@@ -754,15 +751,15 @@ class StateMachine(statesman.SequencingMixin, statesman.StateMachine):
 async def _example() -> None:
     state_machine = StateMachine()
     state_machine.sequence(
-        state_machine.request_description(),
-        state_machine.request_measurement(metrics=[...]),
-        state_machine.recommend_adjustments([...]),
-        state_machine.request_measurement(metrics=[...]),
-        state_machine.recommend_adjustments([...]),
+        statesman.transition_call(state_machine.request_description),
+        statesman.transition_call(state_machine.request_measurement, metrics=[...]),
+        statesman.transition_call(state_machine.recommend_adjustments, [...]),
+        statesman.transition_call(state_machine.request_measurement, metrics=[...]),
+        statesman.transition_call(state_machine.recommend_adjustments, [...]),
     )
 
     while True:
-        transition = state_machine.next_transition()
+        transition = await state_machine.next_transition()
         print(f"Executed transition: {repr(transition)}")
         if not transition:
             break

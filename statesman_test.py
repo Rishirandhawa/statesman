@@ -477,7 +477,7 @@ class TestProgrammaticStateMachine:
         stub.assert_called_once()
 
         # Assign a new state producing two additional actions: exit starting, entry stopping
-        await state_machine.enter_state(stopping)
+        await state_machine.force_enter_state(stopping)
         stub.assert_called()
         assert stub.call_count == 3
 
@@ -511,7 +511,7 @@ class TestProgrammaticStateMachine:
 
         with extra(state_machine):
             callback_mock = mocker.spy(state_machine, callback)
-            await state_machine.enter_state(States.stopping, 1234, foo="bar")
+            await state_machine.force_enter_state(States.stopping, 1234, foo="bar")
             callback_mock.assert_called_once()
             assert len(callback_mock.call_args.args) == 2
             assert isinstance(callback_mock.call_args.args[0], statesman.Transition), "expected a Transition"
@@ -533,7 +533,12 @@ class TestProgrammaticStateMachine:
             state.add_action(lambda: exit_action(), statesman.Action.Types.exit)
 
             on_callback_mock = mocker.spy(state_machine, "on_transition")
-            await state_machine.enter_state(States.starting, 1234, foo="bar", type_=statesman.Transition.Types.internal)
+            await state_machine.force_enter_state(
+                States.starting,
+                1234,
+                foo="bar",
+                type_=statesman.Transition.Types.internal,
+            )
             on_callback_mock.assert_called_once()
 
             entry_action.assert_not_called()
@@ -554,7 +559,12 @@ class TestProgrammaticStateMachine:
             state.add_action(lambda: exit_action(), statesman.Action.Types.exit)
 
             on_callback_mock = mocker.spy(state_machine, "on_transition")
-            await state_machine.enter_state(States.starting, 1234, foo="bar", type_=statesman.Transition.Types.self)
+            await state_machine.force_enter_state(
+                States.starting,
+                1234,
+                foo="bar",
+                type_=statesman.Transition.Types.self,
+            )
             on_callback_mock.assert_called_once()
 
             entry_action.assert_called_once()
@@ -588,9 +598,19 @@ class TestProgrammaticStateMachine:
         assert state_machine.state == States.starting
 
         with pytest.raises(pydantic.ValidationError, match=error_message):
-            await state_machine.enter_state(target_state, type_=transition_type)
+            await state_machine.force_enter_state(target_state, type_=transition_type)
 
     class TestEntryConfig:
+        @pytest.mark.asyncio
+        async def test_default_is_initial(self) -> None:
+            state_machine = statesman.StateMachine(states=statesman.State.from_enum(States))
+            assert state_machine._config.state_entry == statesman.Entry.initial
+            assert await state_machine.enter_state(States.starting)
+            with pytest.raises(
+                RuntimeError, match="state entry failed: `enter_state` is only available to set initial state"
+            ):
+                await state_machine.enter_state(States.stopping)
+
         @pytest.mark.asyncio
         async def test_allow(self) -> None:
             state_machine = statesman.StateMachine(states=statesman.State.from_enum(States))
@@ -637,6 +657,14 @@ class TestProgrammaticStateMachine:
             assert state_machine.state is None
             with pytest.raises(RuntimeError, match="state entry failed: use of the `enter_state` method is forbidden"):
                 assert await state_machine.enter_state(States.starting)
+
+        @pytest.mark.asyncio
+        async def test_force_enter_state_bypasses_policy(self) -> None:
+            state_machine = statesman.StateMachine(states=statesman.State.from_enum(States))
+            assert await state_machine.enter_state(States.starting)
+            assert state_machine.state == States.starting
+            assert await state_machine.force_enter_state(States.stopping)
+            assert state_machine.state == States.stopping
 
     def test_add_event_fails_if_existing(self) -> None:
         state_machine = statesman.StateMachine(states=statesman.State.from_enum(States), state=States.starting)
@@ -1352,7 +1380,7 @@ class TestDecoratorStateMachine:
         await state_machine.enter_state(States.starting)
         assert state_machine.state
         assert state_machine.state == States.starting
-        await state_machine.enter_state(States.running)
+        await state_machine.force_enter_state(States.running)
         assert state_machine.logs == [
             "_enter_states triggered: name='starting' description='Starting...'",
             "_enter_states triggered: name='running' description='Running...'",
@@ -1452,11 +1480,11 @@ class TestSequencer:
     async def test_sequencing(self) -> None:
         state_machine = await TestSequencer.StateMachine.create()
         state_machine.sequence(
-            state_machine.start(name="Foo"),
-            state_machine.run(count=5, another="whatever"),
-            state_machine.trigger_event("stop"),
-            state_machine.terminate(),
-            state_machine.enter_state(States.starting),
+            statesman.transition_call(state_machine.start, name="Foo"),
+            statesman.transition_call(state_machine.run, count=5, another="whatever"),
+            statesman.transition_call(state_machine.trigger_event, "stop"),
+            statesman.transition_call(state_machine.terminate),
+            statesman.transition_call(state_machine.force_enter_state, States.starting),
         )
 
         expected_states = [States.starting, States.running, States.stopping, States.stopped, States.starting]
@@ -1468,3 +1496,12 @@ class TestSequencer:
 
         result = await state_machine.next_transition()
         assert result is None
+
+    def test_sequencing_rejects_coroutines(self) -> None:
+        state_machine = TestSequencer.StateMachine()
+        coroutine = state_machine.start(name="Foo")
+        try:
+            with pytest.raises(TypeError, match="invalid argument: can only sequence TransitionCall objects"):
+                state_machine.sequence(coroutine)
+        finally:
+            coroutine.close()

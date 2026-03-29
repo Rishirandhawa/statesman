@@ -36,11 +36,13 @@ __all__ = [
     "StateEnum",
     "State",
     "Transition",
+    "TransitionCall",
     "Event",
     "InitialState",
     "StateMachine",
     "HistoryMixin",
     "SequencingMixin",
+    "transition_call",
     "event",
     "enter_state",
     "exit_state",
@@ -395,7 +397,7 @@ class Guard(str, enum.Enum):
 
 
 class StateMachineConfig:
-    state_entry = Entry.allow
+    state_entry = Entry.initial
     guard_with = Guard.silence
 
 
@@ -781,6 +783,46 @@ class StateMachine(pydantic.BaseModel):
             LookupError: Raised if the state cannot be found by name or enum value.
             TypeError: Raised if the state value given is not a State, StateEnum, or str object.
         """
+        return await self._enter_state(
+            state,
+            *args,
+            type_=type_,
+            return_type=return_type,
+            **kwargs,
+        )
+
+    async def force_enter_state(
+        self,
+        state: Union[State, StateEnum, str],
+        *args,
+        type_: Optional[Transition.Types] = None,
+        return_type: Type[Result] = bool,
+        **kwargs,
+    ) -> Result:
+        """Transition the state machine into a specific state, bypassing the configured
+        `state_entry` policy.
+
+        This method is an escape hatch for tests, migrations, and recovery flows where
+        explicit state forcing is preferable to modeling an event.
+        """
+        with _state_entry(self, Entry.allow):
+            return await self._enter_state(
+                state,
+                *args,
+                type_=type_,
+                return_type=return_type,
+                **kwargs,
+            )
+
+    async def _enter_state(
+        self,
+        state: Union[State, StateEnum, str],
+        *args,
+        type_: Optional[Transition.Types] = None,
+        return_type: Type[Result] = bool,
+        **kwargs,
+    ) -> Result:
+        """Internal implementation for state entry."""
         state_entry = self._config.state_entry
         if state_entry == Entry.allow:
             pass
@@ -1184,6 +1226,42 @@ class ActionDescriptor(pydantic.BaseModel):
     callable: Callable
 
 
+class TransitionCall:
+    """A deferred transition request for use with `SequencingMixin`.
+
+    The callback should be a transition-triggering async callable such as
+    `trigger_event`, `enter_state`, `force_enter_state`, or a decorated event method.
+    """
+
+    def __init__(self, callback: Callable[..., Coroutine[Any, Any, Any]], *args: Any, **kwargs: Any) -> None:
+        if not callable(callback):
+            raise TypeError("invalid argument: transition calls require a callable callback")
+
+        self.callback = callback
+        self.args = args
+        self.kwargs = kwargs
+
+    async def __call__(self) -> "Transition":
+        kwargs = self.kwargs.copy()
+        return_type = kwargs.pop("return_type", Transition)
+        if return_type is not Transition:
+            raise ValueError("queued transition calls must use return_type=Transition")
+
+        transition = await self.callback(*self.args, return_type=Transition, **kwargs)
+        if not isinstance(transition, Transition):
+            raise TypeError(
+                f"expected return value of type {Transition.__qualname__} but found "
+                f"{transition.__class__.__name__}: {self.callback}"
+            )
+
+        return transition
+
+
+def transition_call(callback: Callable[..., Coroutine[Any, Any, Any]], *args: Any, **kwargs: Any) -> TransitionCall:
+    """Return a deferred transition request for use with `SequencingMixin.sequence`."""
+    return TransitionCall(callback, *args, **kwargs)
+
+
 def event(
     source: Source,
     target: Target,
@@ -1433,45 +1511,30 @@ class SequencingMixin(pydantic.BaseModel):
 
     _queue = pydantic.PrivateAttr(default_factory=collections.deque)
 
-    def sequence(self, *coroutines: List[Coroutine[Any, Any, Transition]]) -> None:
-        """Sequence a series of coroutines that trigger state transitions.
+    def sequence(self, *transitions: TransitionCall) -> None:
+        """Sequence a series of deferred transition requests.
 
-        The coroutines passed may be invocations of `enter_state`, `trigger_event`,
-        or a decorated event function. The coroutines are awaited as they are dequeued
-        via calls to the `next_transition` method.
+        Deferred transition requests can be created with `statesman.transition_call`.
 
         Raises:
-            TypeError: Raised if a sequenced object is not a coroutine.
+            TypeError: Raised if a sequenced object is not a TransitionCall.
         """
-        for coroutine in coroutines:
-            if not inspect.iscoroutine(coroutine):
-                raise TypeError("invalid argument: can only sequence coroutines that trigger state transitions")
+        for transition in transitions:
+            if not isinstance(transition, TransitionCall):
+                raise TypeError("invalid argument: can only sequence TransitionCall objects")
 
-            # Black magic to switch the return type. See StateMachine.enter_state/trigger_event
-            locals_ = inspect.getcoroutinelocals(coroutine)
-            locals_["kwargs"]["return_type"] = Transition
-
-            self._queue.append(coroutine)
+            self._queue.append(transition)
 
     async def next_transition(self) -> Optional[Transition]:
         """Advance to the next sequenced state and return the executed Transition or None if the queue is empty.
 
-        The transition is executed by awaiting the coroutine.
-
-        Raises:
-            TypeError: Raised if the coroutine executed fails to return a Transition.
+        The transition is executed by invoking the next queued `TransitionCall`.
         """
         if not self._queue:
             return None
 
-        coroutine = self._queue.popleft()
-        transition = await coroutine
-        if not isinstance(transition, Transition):
-            raise TypeError(
-                f"expected return value of type {Transition.__qualname__} but found "
-                f"{transition.__class__.__name__}: {coroutine}"
-            )
-        return transition
+        transition_call_ = self._queue.popleft()
+        return await transition_call_()
 
 
 def get_instance_methods(obj, *, stop_at_parent: Optional[Type[Any]] = None) -> Dict[str, Callable]:
