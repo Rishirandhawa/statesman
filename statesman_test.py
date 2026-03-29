@@ -495,6 +495,24 @@ class TestProgrammaticStateMachine:
         assert state_machine.state == States.stopping
 
     @pytest.mark.asyncio
+    async def test_create_accepts_initial_state_alias(self) -> None:
+        state_machine = await statesman.StateMachine.create(
+            states=statesman.State.from_enum(States),
+            initial_state=States.stopping,
+        )
+        assert state_machine.state == States.stopping
+
+    def test_create_rejects_both_state_and_initial_state(self) -> None:
+        with pytest.raises(ValueError, match="specify either `state` or `initial_state`, not both"):
+            asyncio.run(
+                statesman.StateMachine.create(
+                    states=statesman.State.from_enum(States),
+                    state=States.starting,
+                    initial_state=States.stopping,
+                )
+            )
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("callback"),
         [
@@ -576,17 +594,17 @@ class TestProgrammaticStateMachine:
             (
                 States.starting,
                 statesman.Transition.Types.external,
-                "source and target states cannot be the same for external transitions",
+                "use Transition.Types.self to re-enter the state or Transition.Types.internal to stay in-place",
             ),
             (
                 States.running,
                 statesman.Transition.Types.internal,
-                "source and target states must be the same for internal or self transitions",
+                "use Transition.Types.external when changing states",
             ),
             (
                 States.stopping,
                 statesman.Transition.Types.self,
-                "source and target states must be the same for internal or self transitions",
+                "use Transition.Types.external when changing states",
             ),
         ],
     )
@@ -665,6 +683,20 @@ class TestProgrammaticStateMachine:
             assert state_machine.state == States.starting
             assert await state_machine.force_enter_state(States.stopping)
             assert state_machine.state == States.stopping
+
+        def test_nested_config_is_loaded(self) -> None:
+            class Machine(statesman.StateMachine):
+                class States(statesman.StateEnum):
+                    starting = "Starting..."
+                    stopped = statesman.InitialState("Stopped")
+
+                class StatesmanConfig:
+                    state_entry = statesman.Entry.forbid
+                    guard_with = statesman.Guard.exception
+
+            state_machine = Machine()
+            assert state_machine._config.state_entry == statesman.Entry.forbid
+            assert state_machine._config.guard_with == statesman.Guard.exception
 
     def test_add_event_fails_if_existing(self) -> None:
         state_machine = statesman.StateMachine(states=statesman.State.from_enum(States), state=States.starting)
@@ -779,11 +811,23 @@ class TestProgrammaticStateMachine:
             await state_machine.enter_state(States.starting)
             assert state_machine.state == States.starting
             assert state_machine.can_trigger_event("finish")
+            assert state_machine.can_trigger("finish")
             assert not state_machine.can_trigger_event("reset")
             await state_machine.trigger_event("finish")
             assert state_machine.state == States.stopping
             assert not state_machine.can_trigger_event("finish")
             assert state_machine.can_trigger_event("reset")
+
+        @pytest.mark.asyncio
+        async def test_state_name_and_in_state(self, state_machine: statesman.StateMachine) -> None:
+            assert state_machine.state_name is None
+            assert state_machine.in_state(None)
+            await state_machine.enter_state(States.starting)
+            assert state_machine.state_name == "starting"
+            assert state_machine.in_state(States.starting)
+            assert state_machine.in_state("starting")
+            assert state_machine.in_state(state_machine.get_state("starting"))
+            assert not state_machine.in_state(States.stopping)
 
         @pytest.mark.asyncio
         async def test_can_trigger_from_state(self, state_machine: statesman.StateMachine) -> None:
@@ -822,7 +866,7 @@ class TestProgrammaticStateMachine:
             assert state_machine.state is None
             with pytest.raises(
                 RuntimeError,
-                match='event trigger failed: the "finish" event does not support initial state transitions',
+                match='event trigger failed: the "finish" event does not support initial state transitions; ',
             ):
                 await state_machine.trigger_event("finish")
 
@@ -831,7 +875,7 @@ class TestProgrammaticStateMachine:
             await state_machine.enter_state(States.stopping)
             with pytest.raises(
                 RuntimeError,
-                match='event trigger failed: the "finish" event cannot be triggered from the current state of "stopping"',
+                match='event trigger failed: the "finish" event cannot be triggered from the current state of "stopping"; ',
             ):
                 await state_machine.trigger_event("finish")
 
@@ -1406,6 +1450,17 @@ class TestInitialState:
     def test_initial_state_can_be_overridden(self) -> None:
         state_machine = TestInitialState.StateMachine(state=TestInitialState.StateMachine.States.running)
         assert state_machine.state == TestInitialState.StateMachine.States.running
+
+    def test_initial_state_alias_can_be_used(self) -> None:
+        state_machine = TestInitialState.StateMachine(initial_state=TestInitialState.StateMachine.States.running)
+        assert state_machine.state == TestInitialState.StateMachine.States.running
+
+    def test_rejects_state_and_initial_state_together(self) -> None:
+        with pytest.raises(ValueError, match="specify either `state` or `initial_state`, not both"):
+            TestInitialState.StateMachine(
+                state=TestInitialState.StateMachine.States.starting,
+                initial_state=TestInitialState.StateMachine.States.running,
+            )
 
     def test_cannot_set_multiple_initial_states(self) -> None:
         with pytest.raises(

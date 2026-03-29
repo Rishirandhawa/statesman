@@ -400,6 +400,22 @@ class StateMachineConfig:
     state_entry = Entry.initial
     guard_with = Guard.silence
 
+    @classmethod
+    def from_machine_type(cls, machine_type: Type["StateMachine"]) -> "StateMachineConfig":
+        """Build a config object for a state machine type.
+
+        Subclasses can override configuration through a nested `StatesmanConfig`
+        class. A legacy nested `Config` class is also supported for compatibility.
+        """
+        config = cls()
+        config_type = getattr(machine_type, "StatesmanConfig", None) or getattr(machine_type, "Config", None)
+        if config_type:
+            for name in ("state_entry", "guard_with"):
+                if hasattr(config_type, name):
+                    setattr(config, name, getattr(config_type, name))
+
+        return config
+
 
 class StateMachine(pydantic.BaseModel):
     """StateMachine objects model state machines comprised of states, events,
@@ -423,7 +439,7 @@ class StateMachine(pydantic.BaseModel):
     _state: Optional[State] = pydantic.PrivateAttr(None)
     _states: List[State] = pydantic.PrivateAttr([])
     _events: List[Event] = pydantic.PrivateAttr([])
-    _config: StateMachineConfig = pydantic.PrivateAttr(StateMachineConfig())
+    _config: StateMachineConfig = pydantic.PrivateAttr(default_factory=StateMachineConfig)
 
     def __init__(
         self,
@@ -431,13 +447,19 @@ class StateMachine(pydantic.BaseModel):
         states: List[State] = [],
         events: List[Event] = [],
         state: Optional[Union[State, str, StateEnum]] = None,
+        initial_state: Optional[Union[State, str, StateEnum]] = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
 
         # Initialize private attributes
+        self._config = StateMachineConfig.from_machine_type(self.__class__)
         self._states.extend(states)
         self._events.extend(events)
+        if state is not None and initial_state is not None:
+            raise ValueError("invalid initial state: specify either `state` or `initial_state`, not both")
+
+        state = initial_state if initial_state is not None else state
 
         # Handle embedded States class
         state_enum = getattr(self.__class__, "States", None)
@@ -555,6 +577,7 @@ class StateMachine(pydantic.BaseModel):
         states: List[State] = [],
         events: List[Event] = [],
         state: Optional[Union[State, str, StateEnum]] = None,
+        initial_state: Optional[Union[State, str, StateEnum]] = None,
         *args,
         **kwargs,
     ) -> "StateMachine":
@@ -563,7 +586,10 @@ class StateMachine(pydantic.BaseModel):
         Actions are executed and arbitrary parameters can be supplied just as in the `enter_state` method.
         """
         state_machine = cls(states=states, events=events)
-        state_ = state or state_machine.state
+        if state is not None and initial_state is not None:
+            raise ValueError("invalid initial state: specify either `state` or `initial_state`, not both")
+
+        state_ = initial_state if initial_state is not None else state or state_machine.state
         if state_:
             with _state_entry(state_machine):
                 if not await state_machine.enter_state(state_, *args, **kwargs):
@@ -574,6 +600,22 @@ class StateMachine(pydantic.BaseModel):
     def state(self) -> Optional[State]:
         """Return the current state of the state machine."""
         return self._state
+
+    @property
+    def state_name(self) -> Optional[str]:
+        """Return the name of the current state or None when the machine is indeterminate."""
+        return self.state.name if self.state else None
+
+    def in_state(self, state: Optional[Union[State, StateEnum, str]]) -> bool:
+        """Return True when the machine is currently in the given state."""
+        if state is None:
+            return self.state is None
+        if isinstance(state, State):
+            return self.state == state
+        if isinstance(state, (StateEnum, str)):
+            return self.state_name == (state.name if isinstance(state, StateEnum) else state)
+
+        raise TypeError(f'cannot test state membership for type "{state.__class__.__name__}": {state}')
 
     @property
     def states(self) -> List[State]:
@@ -671,6 +713,12 @@ class StateMachine(pydantic.BaseModel):
         state_ = from_state or self.state
         return state_ in event_.sources
 
+    def can_trigger(
+        self, event: Union[Event, str], *, from_state: Optional[Union[str, StateEnum, State]] = None
+    ) -> bool:
+        """Alias for `can_trigger_event` with a shorter coordinator-friendly name."""
+        return self.can_trigger_event(event, from_state=from_state)
+
     def triggerable_events(self, *, from_state: Optional[Union[str, StateEnum, State]] = None) -> List[Event]:
         """Return a list of events triggerable from a state."""
         return list(filter(lambda event: self.can_trigger_event(event, from_state=from_state), self.events))
@@ -717,13 +765,15 @@ class StateMachine(pydantic.BaseModel):
         if self.state not in event_.sources:
             if self.state:
                 raise RuntimeError(
-                    f'event trigger failed: the "{
-                        event_.name}" event cannot be triggered from the current state of "{
-                        self.state.name}"',
+                    f'event trigger failed: the "{event_.name}" event cannot be triggered from the current state '
+                    f'of "{self.state.name}"; use can_trigger("{event_.name}") or triggerable_events() to inspect '
+                    "valid events",
                 )
             else:
                 raise RuntimeError(
-                    f'event trigger failed: the "{event_.name}" event does not support initial state transitions',
+                    f'event trigger failed: the "{event_.name}" event does not support initial state transitions; '
+                    "define an event with source=None, pass initial_state=..., or call enter_state() to establish "
+                    "the initial state explicitly",
                 )
 
         # This is a bit of black magic to modify the args of a coroutine object
@@ -1103,11 +1153,17 @@ class Transition(pydantic.BaseModel):
     def _validate_type(self) -> "Transition":
         type_ = self.type
         if type_ in (Transition.Types.internal, Transition.Types.self):
-            assert (
-                self.target == self.source
-            ), "source and target states must be the same for internal or self transitions"
+            if self.target != self.source:
+                raise ValueError(
+                    "source and target states must be the same for internal or self transitions; "
+                    "use Transition.Types.external when changing states"
+                )
         elif type_ == Transition.Types.external:
-            assert self.target != self.source, "source and target states cannot be the same for external transitions"
+            if self.target == self.source:
+                raise ValueError(
+                    "source and target states cannot be the same for external transitions; "
+                    "use Transition.Types.self to re-enter the state or Transition.Types.internal to stay in-place"
+                )
         else:
             raise ValueError(f'unknown transition type: "{type_}"')
 

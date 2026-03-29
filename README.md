@@ -32,6 +32,9 @@ how state is to be managed going forward.
 * Events support the use of arbitrary associated parameter data that is made
   available to all actions. Parameters are matched against the signature of the
   receiving callable, enabling compartmentalization of concerns.
+* Fits coordinator, control-plane, and async service workflows where state
+  changes need explicit validation, ordered side effects, and readable runtime
+  introspection.
 * Solid test coverage and documentation.
 
 ## Example
@@ -222,11 +225,14 @@ class StateMachine(statesman.StateMachine):
 
 async def _example() -> None:
     # Set at initialization time
-    state_machine = StateMachine(state=StateMachine.States.stopping)
+    state_machine = StateMachine(initial_state=StateMachine.States.stopping)
 
     # Enter an initial state directly
     state_machine = StateMachine()
     await state_machine.enter_state(StateMachine.States.running)
+
+    # Start in an initial state and run entry behavior safely
+    state_machine = await StateMachine.create(initial_state=StateMachine.States.running)
 
     # Via an event
     state_machine = StateMachine()
@@ -237,7 +243,8 @@ async def _example() -> None:
 
 Each state machine instance has a `state` attribute that is the source of truth
 for the state machine. The state can be compared to `statesman.State` object
-instances or string values.
+instances or string values. For coordinator code, `state_name` and `in_state()`
+provide lighter-weight helpers.
 
 ```python
 import statesman
@@ -257,6 +264,8 @@ async def _example() -> None:
     state_machine.state == "stopping"  # => True
     state_machine.state == StateMachine.States.running  # => False
     state_machine.state == "stopped"  # => False
+    state_machine.state_name  # => "stopping"
+    state_machine.in_state(StateMachine.States.stopping)  # => True
 ```
 
 ### Entering States
@@ -288,7 +297,8 @@ The type of transition performed is configurable (see below).
 
 Note that `enter_state` should be used thoughtfully as it enables transitions
 that may not be expressible via events. Its behavior can also be constrained
-and customized.
+and customized. For initialized machines, prefer events. Use
+`force_enter_state()` only when you are deliberately bypassing the event graph.
 
 ### Transition Types
 
@@ -303,6 +313,11 @@ states are the same, there two other possible modes: `internal` and `self`.
     target states are the same but are not exited and reentered during the transition.
 * `statesman.Transition.Types.self`: A transition in which the source and
     target states are the same and are exited and reentered during the transition.
+
+If an event transitions from a state back to the same state, declare the
+transition type explicitly as `statesman.Transition.Types.self` or
+`statesman.Transition.Types.internal`. Statesman will reject same-state external
+transitions and the error message will point you at those two remedies.
 
 ### Transition Return Values
 
@@ -644,7 +659,7 @@ state transition events.
 
 As such, statesman provides a set of behaviors that govern how the `enter_state`
 method behaves. The behavior is configured via the `state_entry` attribute of
-the `Config` class nested within the state machine class.
+the `StatesmanConfig` class nested within the state machine class.
 
 There are four behaviors available for configuration via `state_entry`:
 
@@ -667,9 +682,99 @@ class StateMachine(statesman.StateMachine):
         stopping = 'Stopping...'
         stopped = statesman.InitialState('Terminated.')
 
-    class Config:
+    class StatesmanConfig:
         state_entry = statesman.Entry.forbid
 ```
+
+### Pydantic Model Semantics
+
+Statesman machines are Pydantic models. That is powerful, but it also means the
+usual Pydantic rules apply:
+
+* Declared fields are part of the model surface and validation behavior.
+* Runtime-owned handles such as clients, locks, sessions, caches, or task
+  references should be declared with `pydantic.PrivateAttr`.
+* Assignment to undeclared attributes will follow the model configuration and
+  is not a good place to stash runtime resources.
+
+```python
+import asyncio
+import pydantic
+import statesman
+
+
+class Worker(statesman.StateMachine):
+    class States(statesman.StateEnum):
+        idle = statesman.InitialState("Idle")
+        running = "Running"
+
+    # Model data
+    worker_id: str
+
+    # Runtime-only handles
+    _task: asyncio.Task | None = pydantic.PrivateAttr(default=None)
+    _lock: asyncio.Lock = pydantic.PrivateAttr(default_factory=asyncio.Lock)
+```
+
+If you are integrating with a larger async system, the practical rule is:
+persisted or validated data goes on the model, runtime resources go in
+`PrivateAttr`.
+
+### Async Service Example
+
+Statesman is a good fit for coordinators and control-plane workflows. A typical
+service machine might look like this:
+
+```python
+import asyncio
+from typing import Optional
+
+import pydantic
+import statesman
+
+
+class Service(statesman.StateMachine):
+    class States(statesman.StateEnum):
+        starting = statesman.InitialState("Starting")
+        healthy = "Healthy"
+        degraded = "Degraded"
+        stopping = "Stopping"
+        stopped = "Stopped"
+
+    service_name: str
+    heartbeat_failures: int = 0
+
+    _heartbeat_task: Optional[asyncio.Task] = pydantic.PrivateAttr(default=None)
+
+    @statesman.event(States.starting, States.healthy)
+    async def mark_healthy(self) -> None:
+        ...
+
+    @statesman.event(States.healthy, States.degraded)
+    async def mark_degraded(self, reason: str) -> None:
+        ...
+
+    @statesman.event([States.healthy, States.degraded], States.stopping)
+    async def shutdown(self) -> None:
+        ...
+
+    @statesman.enter_state(States.healthy)
+    async def _start_heartbeat(self) -> None:
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+    @statesman.exit_state(States.healthy)
+    async def _stop_heartbeat(self) -> None:
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+            self._heartbeat_task = None
+
+    async def _heartbeat_loop(self) -> None:
+        ...
+```
+
+In this style, events describe the legal control-plane moves, while private
+attributes hold runtime resources that should not live on the validated model
+surface.
 
 ### Tracking History
 
