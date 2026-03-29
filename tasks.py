@@ -17,7 +17,9 @@ def _format(task):
 
 @invoke.task()
 def test(task):
-    task.run("poetry run pytest --cov=statesman --cov-report=term-missing:skip-covered --cov-config=setup.cfg .", pty=True)
+    task.run(
+        "poetry run pytest --cov=statesman --cov-report=term-missing:skip-covered --cov-config=setup.cfg .", pty=True
+    )
 
 
 @invoke.task()
@@ -27,12 +29,12 @@ def typecheck(task):
 
 @invoke.task(name="lint-docs")
 def lint_docs(task):
-    task.run("poetry run flake8-markdown \"**/*.md\" || true", pty=True)
+    task.run('poetry run flake8-markdown "**/*.md" || true', pty=True)
 
 
 @invoke.task(lint_docs)
 def lint(task):
-    task.run("poetry run flakehell lint --count", pty=True)
+    task.run("poetry run flake8 statesman.py statesman_test.py tasks.py", pty=True)
 
 
 @invoke.task(name="pre-commit")
