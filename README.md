@@ -1,20 +1,25 @@
 # statesman
 
-![Run Tests](https://github.com/opsani/statesman/workflows/Run%20Tests/badge.svg)
-[![license](https://img.shields.io/github/license/opsani/statesman.svg)](https://github.com/opsani/statesman/blob/master/LICENSE)
-[![PyPI](https://img.shields.io/pypi/v/statesman.svg)](https://pypi.org/project/statesman/)
-[![release](https://img.shields.io/github/release/opsani/statesman.svg)](https://github.com/opsani/statesman/releases/latest)
+![Run Tests](https://github.com/Rishirandhawa/statesman/actions/workflows/test.yaml/badge.svg?branch=main)
+[![license](https://img.shields.io/github/license/Rishirandhawa/statesman.svg)](https://github.com/Rishirandhawa/statesman/blob/main/LICENSE)
+[![release](https://img.shields.io/github/release/Rishirandhawa/statesman.svg)](https://github.com/Rishirandhawa/statesman/releases/latest)
 [![GitHub release
-date](https://img.shields.io/github/release-date/opsani/statesman.svg)](https://github.com/opsani/statesman/releases)
+date](https://img.shields.io/github/release-date/Rishirandhawa/statesman.svg)](https://github.com/Rishirandhawa/statesman/releases)
 
 ![Statesman Logo](./docs/statesman_logo.png)
 
 **The diplomatic path to building state machines in modern Python.**
 
 statesman is a library that provides an elegant and expressive API for
-implementing state machines in asynchronous Python 3.8+. It will negotiate
+implementing state machines in asynchronous Python 3.10+. It will negotiate
 with complexity on your behalf and broker a clear, concise agreement about
 how state is to be managed going forward.
+
+This repository is the maintained continuation of the original `statesman`
+project by Blake Watters. It preserves the original design and credits the
+original author while extending the unmaintained upstream with current Python
+support, modern Pydantic compatibility, improved ergonomics, and clearer
+service-orchestration documentation.
 
 ## Features
 

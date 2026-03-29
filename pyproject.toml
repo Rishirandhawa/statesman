@@ -1,12 +1,27 @@
 [tool.poetry]
 name = "statesman"
 version = "1.0.5"
-description = "A modern state machine library."
+description = "Maintained continuation of Blake Watters' async state machine library for modern Python."
 authors = ["Blake Watters <blake@opsani.com>"]
 license = "Apache-2.0"
 readme = "README.md"
-homepage = "https://github.com/opsani/statesman"
-repository = "https://github.com/opsani/statesman"
+homepage = "https://github.com/Rishirandhawa/statesman"
+repository = "https://github.com/Rishirandhawa/statesman"
+keywords = ["state machine", "finite state machine", "fsm", "asyncio", "workflow", "orchestration", "pydantic"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Framework :: AsyncIO",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Object Brokering",
+]
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.14"
